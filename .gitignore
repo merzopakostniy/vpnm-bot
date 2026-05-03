@@ -1,0 +1,7 @@
+.env
+payments.db
+.venv/
+__pycache__/
+*.pyc
+happ_test_profile*.json
+.DS_Store
