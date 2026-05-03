@@ -386,6 +386,14 @@ def close_support_ticket(ticket_id: int) -> None:
         db.commit()
 
 
+def support_message_body(message: types.Message) -> str:
+    if message.text:
+        return message.text
+    if message.caption:
+        return f"[{message.content_type}] {message.caption}"
+    return f"[{message.content_type}]"
+
+
 def main_keyboard(user_id: Optional[int] = None) -> InlineKeyboardMarkup:
     rows = [
         [InlineKeyboardButton(text="🚀 Купить VPN-доступ", callback_data="buy")],
@@ -1618,6 +1626,75 @@ async def support_message_router(message: types.Message) -> None:
     )
     await message.answer(
         f"✅ Сообщение отправлено в поддержку по обращению <b>#{ticket['id']}</b>.\n\n"
+        "Ответ придет сюда.",
+        reply_markup=support_keyboard(ticket["id"], for_admin=False),
+        parse_mode="HTML",
+    )
+
+
+@router.message(F.photo | F.document | F.video | F.animation | F.voice | F.audio | F.video_note)
+async def support_media_router(message: types.Message) -> None:
+    if not message.from_user:
+        return
+
+    if is_admin(message.from_user.id) and message.from_user.id in admin_reply_state:
+        ticket_id = admin_reply_state.pop(message.from_user.id)
+        ticket = get_support_ticket(ticket_id)
+        if not ticket or ticket["status"] != "open":
+            await message.answer("Обращение не найдено или уже закрыто.")
+            return
+
+        add_support_message(ticket_id, message.from_user.id, "admin", support_message_body(message))
+        await track_event("support_admin_reply_media", message.from_user.id, ticket_id=ticket_id, media_type=message.content_type)
+        await message.bot.send_message(
+            ticket["user_id"],
+            f"💬 <b>Ответ поддержки по обращению #{ticket_id}</b>",
+            reply_markup=support_keyboard(ticket_id, for_admin=False),
+            parse_mode="HTML",
+        )
+        await message.copy_to(ticket["user_id"])
+        await message.answer(
+            f"✅ Медиа-ответ отправлен пользователю по обращению <b>#{ticket_id}</b>.",
+            reply_markup=support_keyboard(ticket_id, for_admin=True),
+            parse_mode="HTML",
+        )
+        return
+
+    ticket = get_open_support_ticket(message.from_user.id)
+    if not ticket:
+        await message.answer(
+            "Чтобы отправить файл или скрин в поддержку, сначала создайте обращение.",
+            reply_markup=support_entry_keyboard(),
+        )
+        return
+
+    add_support_message(ticket["id"], message.from_user.id, "user", support_message_body(message))
+    full_ticket = get_support_ticket(ticket["id"]) or ticket
+    await track_event(
+        "support_user_media",
+        message.from_user.id,
+        ticket_id=ticket["id"],
+        media_type=message.content_type,
+        **user_payload(message.from_user),
+    )
+
+    for admin_id in ADMIN_TELEGRAM_IDS:
+        try:
+            await message.bot.send_message(
+                admin_id,
+                f"📎 <b>Вложение по обращению #{ticket['id']}</b>\n\n"
+                f"Пользователь: {support_user_label(full_ticket)}",
+                reply_markup=support_keyboard(ticket["id"], for_admin=True),
+                parse_mode="HTML",
+            )
+            await message.copy_to(admin_id)
+        except TelegramBadRequest as exc:
+            logger.warning("Cannot send ticket media to admin %s: %s", admin_id, exc.message)
+        except Exception:
+            logger.exception("Cannot send ticket media to admin %s", admin_id)
+
+    await message.answer(
+        f"✅ Вложение отправлено в поддержку по обращению <b>#{ticket['id']}</b>.\n\n"
         "Ответ придет сюда.",
         reply_markup=support_keyboard(ticket["id"], for_admin=False),
         parse_mode="HTML",
