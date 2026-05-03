@@ -411,11 +411,22 @@ def main_keyboard(user_id: Optional[int] = None) -> InlineKeyboardMarkup:
     rows = [
         [InlineKeyboardButton(text="🚀 Купить VPN-доступ", callback_data="buy")],
         [InlineKeyboardButton(text="🔑 Мои ключи", callback_data="my_keys")],
+        [InlineKeyboardButton(text="📲 Как подключиться", callback_data="connect_help")],
         [InlineKeyboardButton(text="💬 Помощь и поддержка", callback_data="support")],
     ]
     if user_id in ADMIN_TELEGRAM_IDS:
         rows.append([InlineKeyboardButton(text="🧪 Выдать тестовый ключ", callback_data="admin_test_key")])
     return InlineKeyboardMarkup(inline_keyboard=rows)
+
+
+def connect_help_keyboard() -> InlineKeyboardMarkup:
+    return InlineKeyboardMarkup(
+        inline_keyboard=[
+            [InlineKeyboardButton(text="🔑 Мои ключи", callback_data="my_keys")],
+            [InlineKeyboardButton(text="💬 Поддержка", callback_data="support")],
+            [InlineKeyboardButton(text="← Назад", callback_data="back")],
+        ]
+    )
 
 
 def start_text() -> str:
@@ -429,6 +440,26 @@ def start_text() -> str:
         "📲 Отдельный JSON-профиль для Happ + ссылка для других клиентов\n"
         "🕒 Автоматический срок действия после оплаты\n\n"
         "Выберите действие:"
+    )
+
+
+def connect_help_text() -> str:
+    return (
+        "📲 <b>Как подключиться</b>\n\n"
+        "<b>iPhone / iPad</b>\n"
+        "Приложения: <b>Happ</b>, <b>Streisand</b> или <b>v2rayTun</b>.\n"
+        "Проще всего: откройте <b>Мои ключи</b>, импортируйте JSON-файл в Happ. Если файл не подошел, нажмите "
+        "<b>Показать ручную ссылку</b> и импортируйте VLESS-ссылку из буфера.\n\n"
+        "<b>Android</b>\n"
+        "Приложения: <b>v2rayNG</b>, <b>NekoBox</b> или <b>Happ</b>.\n"
+        "Скопируйте VLESS-ссылку из <b>Мои ключи → Показать ручную ссылку</b> и выберите импорт из буфера.\n\n"
+        "<b>Windows</b>\n"
+        "Приложения: <b>v2rayN</b> или <b>Nekoray</b>.\n"
+        "Скопируйте VLESS-ссылку и добавьте профиль через импорт из буфера.\n\n"
+        "<b>macOS</b>\n"
+        "Приложения: <b>Streisand</b>, <b>Happ</b> или <b>Nekoray</b>.\n"
+        "Используйте ручную VLESS-ссылку или JSON-профиль, если приложение его принимает.\n\n"
+        f"Один ключ работает на <b>{DEVICE_LIMIT} устройствах</b>."
     )
 
 
@@ -725,6 +756,7 @@ def issued_key_keyboard(order_id: int) -> InlineKeyboardMarkup:
     return InlineKeyboardMarkup(
         inline_keyboard=[
             [InlineKeyboardButton(text="Показать ручную ссылку", callback_data=f"show_vless:{order_id}")],
+            [InlineKeyboardButton(text="📲 Как подключиться", callback_data="connect_help")],
             [InlineKeyboardButton(text="🔑 Мои ключи", callback_data="my_keys")],
         ]
     )
@@ -1148,6 +1180,16 @@ async def keys_command(message: types.Message) -> None:
         )
 
 
+@router.message(Command("connect"))
+async def connect_command(message: types.Message) -> None:
+    await track_event("connect_help_opened", message.from_user.id, **user_payload(message.from_user))
+    await message.answer(
+        connect_help_text(),
+        reply_markup=connect_help_keyboard(),
+        parse_mode="HTML",
+    )
+
+
 @router.message(Command("support"))
 async def support_command(message: types.Message) -> None:
     await track_event("support_opened", message.from_user.id, **user_payload(message.from_user))
@@ -1168,6 +1210,7 @@ async def help_command(message: types.Message) -> None:
         "/start - главное меню\n"
         "/buy - купить доступ\n"
         "/keys - мои ключи\n"
+        "/connect - как подключиться\n"
         "/support - поддержка\n"
         "/id - ваш Telegram ID\n"
         "/help - помощь\n\n"
@@ -1215,6 +1258,17 @@ async def buy(callback: types.CallbackQuery) -> None:
         f"Каждый тариф включает 1 VPN-ключ на <b>{DEVICE_LIMIT} устройства</b>. "
         "Ключ создается автоматически после оплаты.",
         reply_markup=tariffs_keyboard(),
+        parse_mode="HTML",
+    )
+    await callback.answer()
+
+
+@router.callback_query(F.data == "connect_help")
+async def connect_help(callback: types.CallbackQuery) -> None:
+    await track_event("connect_help_opened", callback.from_user.id, **user_payload(callback.from_user))
+    await callback.message.answer(
+        connect_help_text(),
+        reply_markup=connect_help_keyboard(),
         parse_mode="HTML",
     )
     await callback.answer()
@@ -1787,6 +1841,7 @@ async def setup_bot_commands(bot: Bot) -> None:
             BotCommand(command="start", description="Главное меню"),
             BotCommand(command="buy", description="Купить VPN-доступ"),
             BotCommand(command="keys", description="Мои ключи"),
+            BotCommand(command="connect", description="Как подключиться"),
             BotCommand(command="support", description="Помощь и поддержка"),
             BotCommand(command="id", description="Мой Telegram ID"),
             BotCommand(command="help", description="Все команды"),
