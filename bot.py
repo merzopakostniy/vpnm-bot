@@ -53,11 +53,16 @@ HAPP_FULL_DIRECT_LIST = os.getenv("HAPP_FULL_DIRECT_LIST", "false").lower() in {
     "yes",
     "on",
 }
-ADMIN_TELEGRAM_IDS = {
-    int(value)
-    for value in os.getenv("ADMIN_TELEGRAM_IDS", "").replace(" ", "").split(",")
-    if value.isdigit()
-}
+def parse_telegram_ids(raw_value: str) -> set:
+    return {
+        int(value)
+        for value in raw_value.replace(" ", "").split(",")
+        if value.isdigit()
+    }
+
+
+ADMIN_TELEGRAM_IDS = parse_telegram_ids(os.getenv("ADMIN_TELEGRAM_IDS", ""))
+SUPPORT_TELEGRAM_IDS = parse_telegram_ids(os.getenv("SUPPORT_TELEGRAM_IDS", "")) or ADMIN_TELEGRAM_IDS
 ADMIN_TEST_DAYS = int(os.getenv("ADMIN_TEST_DAYS", "30") or "30")
 LOG_LEVEL = os.getenv("LOG_LEVEL", "INFO").upper()
 TGDASH_ENABLED = os.getenv("TGDASH_ENABLED", "false").lower() in {"1", "true", "yes", "on"}
@@ -421,6 +426,10 @@ def start_text() -> str:
 
 def is_admin(user_id: int) -> bool:
     return user_id in ADMIN_TELEGRAM_IDS
+
+
+def is_support(user_id: int) -> bool:
+    return user_id in SUPPORT_TELEGRAM_IDS
 
 
 def format_date(value: str) -> str:
@@ -1493,7 +1502,7 @@ async def ticket_user_close(callback: types.CallbackQuery) -> None:
 
 @router.callback_query(F.data.startswith("ticket_reply:"))
 async def ticket_reply(callback: types.CallbackQuery) -> None:
-    if not is_admin(callback.from_user.id):
+    if not is_support(callback.from_user.id):
         await callback.answer("Недоступно", show_alert=True)
         return
 
@@ -1514,7 +1523,7 @@ async def ticket_reply(callback: types.CallbackQuery) -> None:
 
 @router.callback_query(F.data.startswith("ticket_close:"))
 async def ticket_close(callback: types.CallbackQuery) -> None:
-    if not is_admin(callback.from_user.id):
+    if not is_support(callback.from_user.id):
         await callback.answer("Недоступно", show_alert=True)
         return
 
@@ -1587,7 +1596,7 @@ async def support_message_router(message: types.Message) -> None:
     if not message.from_user or not message.text or message.text.startswith("/"):
         return
 
-    if is_admin(message.from_user.id) and message.from_user.id in admin_reply_state:
+    if is_support(message.from_user.id) and message.from_user.id in admin_reply_state:
         ticket_id = admin_reply_state.pop(message.from_user.id)
         ticket = get_support_ticket(ticket_id)
         if not ticket or ticket["status"] != "open":
@@ -1637,7 +1646,7 @@ async def support_media_router(message: types.Message) -> None:
     if not message.from_user:
         return
 
-    if is_admin(message.from_user.id) and message.from_user.id in admin_reply_state:
+    if is_support(message.from_user.id) and message.from_user.id in admin_reply_state:
         ticket_id = admin_reply_state.pop(message.from_user.id)
         ticket = get_support_ticket(ticket_id)
         if not ticket or ticket["status"] != "open":
@@ -1678,7 +1687,7 @@ async def support_media_router(message: types.Message) -> None:
         **user_payload(message.from_user),
     )
 
-    for admin_id in ADMIN_TELEGRAM_IDS:
+    for admin_id in SUPPORT_TELEGRAM_IDS:
         try:
             await message.bot.send_message(
                 admin_id,
@@ -1712,7 +1721,7 @@ async def notify_admins(bot: Bot, text: str) -> None:
 
 
 async def notify_ticket_admins(bot: Bot, ticket: Dict[str, Any], text: str) -> None:
-    for admin_id in ADMIN_TELEGRAM_IDS:
+    for admin_id in SUPPORT_TELEGRAM_IDS:
         try:
             await bot.send_message(
                 admin_id,
