@@ -1,4 +1,5 @@
 import asyncio
+import fcntl
 import hashlib
 import hmac
 import json
@@ -74,6 +75,7 @@ PROFILE_LISTEN_PORT = int(os.getenv("PROFILE_LISTEN_PORT", "8091") or "8091")
 
 BASE_DIR = os.path.dirname(os.path.abspath(__file__))
 DB_PATH = os.path.join(BASE_DIR, "payments.db")
+LOCK_PATH = os.path.join(BASE_DIR, "vpnbot.lock")
 HAPP_DIRECT_DOMAINS_PATH = os.path.join(BASE_DIR, "assets", "happ_direct_domains.txt")
 
 TARIFFS = {
@@ -96,6 +98,7 @@ PAID_STATUSES = {"paid", "admin_issued"}
 ISSUING_STATUSES = {"issuing", "admin_creating"}
 FAILED_STATUSES = {"paid_issue_failed", "admin_issue_failed"}
 admin_reply_state: Dict[int, int] = {}
+instance_lock_file = None
 
 
 async def track_event(event: str, user_id: int, **kwargs: Any) -> None:
@@ -1849,6 +1852,18 @@ async def setup_bot_commands(bot: Bot) -> None:
     )
 
 
+def acquire_instance_lock() -> None:
+    global instance_lock_file
+
+    instance_lock_file = open(LOCK_PATH, "w", encoding="utf-8")
+    try:
+        fcntl.flock(instance_lock_file.fileno(), fcntl.LOCK_EX | fcntl.LOCK_NB)
+    except BlockingIOError as exc:
+        raise RuntimeError("Another bot instance is already running") from exc
+    instance_lock_file.write(str(os.getpid()))
+    instance_lock_file.flush()
+
+
 def validate_env() -> None:
     required = {
         "BOT_TOKEN": BOT_TOKEN,
@@ -1866,6 +1881,7 @@ def validate_env() -> None:
 async def main() -> None:
     global xui
 
+    acquire_instance_lock()
     validate_env()
     init_db()
 
