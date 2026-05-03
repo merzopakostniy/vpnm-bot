@@ -90,6 +90,7 @@ router = Router()
 PAID_STATUSES = {"paid", "admin_issued"}
 ISSUING_STATUSES = {"issuing", "admin_creating"}
 FAILED_STATUSES = {"paid_issue_failed", "admin_issue_failed"}
+admin_reply_state: Dict[int, int] = {}
 
 
 async def track_event(event: str, user_id: int, **kwargs: Any) -> None:
@@ -228,6 +229,30 @@ def init_db() -> None:
             )
             """
         )
+        db.execute(
+            """
+            CREATE TABLE IF NOT EXISTS support_tickets (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                user_id INTEGER NOT NULL,
+                status TEXT NOT NULL,
+                created_at TEXT NOT NULL,
+                updated_at TEXT NOT NULL,
+                closed_at TEXT
+            )
+            """
+        )
+        db.execute(
+            """
+            CREATE TABLE IF NOT EXISTS support_messages (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                ticket_id INTEGER NOT NULL,
+                sender_id INTEGER NOT NULL,
+                sender_role TEXT NOT NULL,
+                text TEXT NOT NULL,
+                created_at TEXT NOT NULL
+            )
+            """
+        )
         db.commit()
 
 
@@ -245,6 +270,118 @@ def upsert_user(user: types.User) -> None:
                 updated_at = excluded.updated_at
             """,
             (user.id, user.username, user.first_name, user.last_name, now, now),
+        )
+        db.commit()
+
+
+def support_keyboard(ticket_id: int, *, for_admin: bool) -> InlineKeyboardMarkup:
+    if for_admin:
+        rows = [
+            [
+                InlineKeyboardButton(text="✍️ Ответить", callback_data=f"ticket_reply:{ticket_id}"),
+                InlineKeyboardButton(text="✅ Закрыть", callback_data=f"ticket_close:{ticket_id}"),
+            ],
+        ]
+    else:
+        rows = [[InlineKeyboardButton(text="✅ Закрыть обращение", callback_data=f"ticket_user_close:{ticket_id}")]]
+    return InlineKeyboardMarkup(inline_keyboard=rows)
+
+
+def support_entry_keyboard(active_ticket_id: Optional[int] = None) -> InlineKeyboardMarkup:
+    rows = []
+    if active_ticket_id:
+        rows.append([InlineKeyboardButton(text="✍️ Написать в обращение", callback_data=f"ticket_continue:{active_ticket_id}")])
+        rows.append([InlineKeyboardButton(text="✅ Закрыть обращение", callback_data=f"ticket_user_close:{active_ticket_id}")])
+    else:
+        rows.append([InlineKeyboardButton(text="🆕 Создать обращение", callback_data="ticket_new")])
+    rows.append([InlineKeyboardButton(text="← Назад", callback_data="back")])
+    return InlineKeyboardMarkup(inline_keyboard=rows)
+
+
+def support_user_label(row: Dict[str, Any]) -> str:
+    username = row.get("username")
+    name = " ".join(value for value in [row.get("first_name"), row.get("last_name")] if value)
+    parts = []
+    if name:
+        parts.append(escape(name))
+    if username:
+        parts.append(f"@{escape(username)}")
+    parts.append(f"<code>{row['user_id']}</code>")
+    return " / ".join(parts)
+
+
+def get_open_support_ticket(user_id: int) -> Optional[Dict[str, Any]]:
+    with sqlite3.connect(DB_PATH) as db:
+        db.row_factory = sqlite3.Row
+        row = db.execute(
+            """
+            SELECT * FROM support_tickets
+            WHERE user_id = ? AND status = 'open'
+            ORDER BY id DESC
+            LIMIT 1
+            """,
+            (user_id,),
+        ).fetchone()
+    return dict(row) if row else None
+
+
+def get_support_ticket(ticket_id: int) -> Optional[Dict[str, Any]]:
+    with sqlite3.connect(DB_PATH) as db:
+        db.row_factory = sqlite3.Row
+        row = db.execute(
+            """
+            SELECT t.*, u.username, u.first_name, u.last_name
+            FROM support_tickets t
+            LEFT JOIN users u ON u.tg_id = t.user_id
+            WHERE t.id = ?
+            """,
+            (ticket_id,),
+        ).fetchone()
+    return dict(row) if row else None
+
+
+def create_support_ticket(user: types.User) -> int:
+    upsert_user(user)
+    now = utc_now().isoformat()
+    with sqlite3.connect(DB_PATH) as db:
+        cursor = db.execute(
+            """
+            INSERT INTO support_tickets (user_id, status, created_at, updated_at)
+            VALUES (?, 'open', ?, ?)
+            """,
+            (user.id, now, now),
+        )
+        db.commit()
+        return int(cursor.lastrowid)
+
+
+def add_support_message(ticket_id: int, sender_id: int, sender_role: str, text: str) -> None:
+    now = utc_now().isoformat()
+    with sqlite3.connect(DB_PATH) as db:
+        db.execute(
+            """
+            INSERT INTO support_messages (ticket_id, sender_id, sender_role, text, created_at)
+            VALUES (?, ?, ?, ?, ?)
+            """,
+            (ticket_id, sender_id, sender_role, text, now),
+        )
+        db.execute(
+            "UPDATE support_tickets SET updated_at = ? WHERE id = ?",
+            (now, ticket_id),
+        )
+        db.commit()
+
+
+def close_support_ticket(ticket_id: int) -> None:
+    now = utc_now().isoformat()
+    with sqlite3.connect(DB_PATH) as db:
+        db.execute(
+            """
+            UPDATE support_tickets
+            SET status = 'closed', closed_at = ?, updated_at = ?
+            WHERE id = ?
+            """,
+            (now, now, ticket_id),
         )
         db.commit()
 
@@ -989,19 +1126,14 @@ async def keys_command(message: types.Message) -> None:
 @router.message(Command("support"))
 async def support_command(message: types.Message) -> None:
     await track_event("support_opened", message.from_user.id, **user_payload(message.from_user))
-    if SUPPORT_USERNAME:
-        text = (
-            "💬 <b>Помощь и поддержка</b>\n\n"
-            f"Напишите нам: @{SUPPORT_USERNAME}\n\n"
-            "В сообщении укажите ваш Telegram ID и что именно не работает."
-        )
-    else:
-        text = (
-            "💬 <b>Помощь и поддержка</b>\n\n"
-            "Поддержка пока не указана. Напишите администратору сервиса.\n\n"
-            f"Ваш Telegram ID: <code>{message.from_user.id}</code>"
-        )
-    await message.answer(text, parse_mode="HTML")
+    active_ticket = get_open_support_ticket(message.from_user.id)
+    await message.answer(
+        "💬 <b>Поддержка</b>\n\n"
+        "Создайте обращение и напишите вопрос прямо сюда. Администратор ответит вам в этом чате.\n\n"
+        f"Ваш Telegram ID: <code>{message.from_user.id}</code>",
+        reply_markup=support_entry_keyboard(active_ticket["id"] if active_ticket else None),
+        parse_mode="HTML",
+    )
 
 
 @router.message(Command("help"))
@@ -1271,19 +1403,129 @@ async def show_vless(callback: types.CallbackQuery) -> None:
 @router.callback_query(F.data == "support")
 async def support(callback: types.CallbackQuery) -> None:
     await track_event("support_opened", callback.from_user.id, **user_payload(callback.from_user))
-    if SUPPORT_USERNAME:
-        text = (
-            "💬 <b>Помощь и поддержка</b>\n\n"
-            f"Напишите нам: @{SUPPORT_USERNAME}\n\n"
-            "В сообщении укажите ваш Telegram ID и что именно не работает."
+    active_ticket = get_open_support_ticket(callback.from_user.id)
+    await callback.message.answer(
+        "💬 <b>Поддержка</b>\n\n"
+        "Создайте обращение и напишите вопрос прямо сюда. Администратор ответит вам в этом чате.\n\n"
+        f"Ваш Telegram ID: <code>{callback.from_user.id}</code>",
+        reply_markup=support_entry_keyboard(active_ticket["id"] if active_ticket else None),
+        parse_mode="HTML",
+    )
+    await callback.answer()
+
+
+@router.callback_query(F.data == "ticket_new")
+async def ticket_new(callback: types.CallbackQuery) -> None:
+    active_ticket = get_open_support_ticket(callback.from_user.id)
+    if active_ticket:
+        await callback.message.answer(
+            f"💬 У вас уже есть открытое обращение <b>#{active_ticket['id']}</b>.\n\n"
+            "Напишите сообщение сюда, и я передам его администратору.",
+            reply_markup=support_keyboard(active_ticket["id"], for_admin=False),
+            parse_mode="HTML",
         )
-    else:
-        text = (
-            "💬 <b>Помощь и поддержка</b>\n\n"
-            "Поддержка пока не указана. Напишите администратору сервиса.\n\n"
-            f"Ваш Telegram ID: <code>{callback.from_user.id}</code>"
+        await callback.answer()
+        return
+
+    ticket_id = create_support_ticket(callback.from_user)
+    ticket = get_support_ticket(ticket_id)
+    await track_event("support_ticket_created", callback.from_user.id, ticket_id=ticket_id, **user_payload(callback.from_user))
+    await callback.message.answer(
+        f"💬 <b>Обращение #{ticket_id} создано</b>\n\n"
+        "Опишите проблему одним сообщением: что не работает, какой клиент используете и на каком устройстве.",
+        reply_markup=support_keyboard(ticket_id, for_admin=False),
+        parse_mode="HTML",
+    )
+    if ticket:
+        await notify_ticket_admins(
+            callback.bot,
+            ticket,
+            f"🆕 <b>Новое обращение #{ticket_id}</b>\n\n"
+            f"Пользователь: {support_user_label(ticket)}\n\n"
+            "Пока без сообщения. Ждем текст от пользователя.",
         )
-    await callback.message.answer(text, parse_mode="HTML")
+    await callback.answer("Обращение создано")
+
+
+@router.callback_query(F.data.startswith("ticket_continue:"))
+async def ticket_continue(callback: types.CallbackQuery) -> None:
+    ticket_id = int(callback.data.split(":", 1)[1])
+    ticket = get_support_ticket(ticket_id)
+    if not ticket or ticket["user_id"] != callback.from_user.id or ticket["status"] != "open":
+        await callback.answer("Обращение не найдено или уже закрыто", show_alert=True)
+        return
+    await callback.message.answer(
+        f"💬 <b>Обращение #{ticket_id}</b>\n\n"
+        "Напишите сообщение сюда, я передам его администратору.",
+        reply_markup=support_keyboard(ticket_id, for_admin=False),
+        parse_mode="HTML",
+    )
+    await callback.answer()
+
+
+@router.callback_query(F.data.startswith("ticket_user_close:"))
+async def ticket_user_close(callback: types.CallbackQuery) -> None:
+    ticket_id = int(callback.data.split(":", 1)[1])
+    ticket = get_support_ticket(ticket_id)
+    if not ticket or ticket["user_id"] != callback.from_user.id:
+        await callback.answer("Обращение не найдено", show_alert=True)
+        return
+    if ticket["status"] != "closed":
+        close_support_ticket(ticket_id)
+        await notify_ticket_admins(
+            callback.bot,
+            ticket,
+            f"✅ <b>Обращение #{ticket_id} закрыто пользователем</b>\n\n"
+            f"Пользователь: {support_user_label(ticket)}",
+        )
+    await track_event("support_ticket_closed_by_user", callback.from_user.id, ticket_id=ticket_id)
+    await callback.message.answer(f"✅ Обращение <b>#{ticket_id}</b> закрыто.", parse_mode="HTML")
+    await callback.answer()
+
+
+@router.callback_query(F.data.startswith("ticket_reply:"))
+async def ticket_reply(callback: types.CallbackQuery) -> None:
+    if not is_admin(callback.from_user.id):
+        await callback.answer("Недоступно", show_alert=True)
+        return
+
+    ticket_id = int(callback.data.split(":", 1)[1])
+    ticket = get_support_ticket(ticket_id)
+    if not ticket or ticket["status"] != "open":
+        await callback.answer("Обращение не найдено или закрыто", show_alert=True)
+        return
+
+    admin_reply_state[callback.from_user.id] = ticket_id
+    await callback.message.answer(
+        f"✍️ Ответ на обращение <b>#{ticket_id}</b>\n\n"
+        "Напишите следующим сообщением текст ответа. Я отправлю его пользователю.",
+        parse_mode="HTML",
+    )
+    await callback.answer()
+
+
+@router.callback_query(F.data.startswith("ticket_close:"))
+async def ticket_close(callback: types.CallbackQuery) -> None:
+    if not is_admin(callback.from_user.id):
+        await callback.answer("Недоступно", show_alert=True)
+        return
+
+    ticket_id = int(callback.data.split(":", 1)[1])
+    ticket = get_support_ticket(ticket_id)
+    if not ticket:
+        await callback.answer("Обращение не найдено", show_alert=True)
+        return
+    if ticket["status"] != "closed":
+        close_support_ticket(ticket_id)
+        admin_reply_state.pop(callback.from_user.id, None)
+        await callback.bot.send_message(
+            ticket["user_id"],
+            f"✅ Обращение <b>#{ticket_id}</b> закрыто администратором.\n\n"
+            "Если вопрос вернется, создайте новое обращение в поддержке.",
+            parse_mode="HTML",
+        )
+    await track_event("support_ticket_closed_by_admin", callback.from_user.id, ticket_id=ticket_id)
+    await callback.message.answer(f"✅ Обращение <b>#{ticket_id}</b> закрыто.", parse_mode="HTML")
     await callback.answer()
 
 
@@ -1332,6 +1574,56 @@ async def admin_test_key(callback: types.CallbackQuery) -> None:
     await callback.answer()
 
 
+@router.message(F.text)
+async def support_message_router(message: types.Message) -> None:
+    if not message.from_user or not message.text or message.text.startswith("/"):
+        return
+
+    if is_admin(message.from_user.id) and message.from_user.id in admin_reply_state:
+        ticket_id = admin_reply_state.pop(message.from_user.id)
+        ticket = get_support_ticket(ticket_id)
+        if not ticket or ticket["status"] != "open":
+            await message.answer("Обращение не найдено или уже закрыто.")
+            return
+
+        add_support_message(ticket_id, message.from_user.id, "admin", message.text)
+        await track_event("support_admin_reply", message.from_user.id, ticket_id=ticket_id)
+        await message.bot.send_message(
+            ticket["user_id"],
+            f"💬 <b>Ответ поддержки по обращению #{ticket_id}</b>\n\n"
+            f"{escape(message.text)}",
+            reply_markup=support_keyboard(ticket_id, for_admin=False),
+            parse_mode="HTML",
+        )
+        await message.answer(
+            f"✅ Ответ отправлен пользователю по обращению <b>#{ticket_id}</b>.",
+            reply_markup=support_keyboard(ticket_id, for_admin=True),
+            parse_mode="HTML",
+        )
+        return
+
+    ticket = get_open_support_ticket(message.from_user.id)
+    if not ticket:
+        return
+
+    add_support_message(ticket["id"], message.from_user.id, "user", message.text)
+    full_ticket = get_support_ticket(ticket["id"]) or ticket
+    await track_event("support_user_message", message.from_user.id, ticket_id=ticket["id"], **user_payload(message.from_user))
+    await notify_ticket_admins(
+        message.bot,
+        full_ticket,
+        f"💬 <b>Сообщение по обращению #{ticket['id']}</b>\n\n"
+        f"Пользователь: {support_user_label(full_ticket)}\n\n"
+        f"{escape(message.text)}",
+    )
+    await message.answer(
+        f"✅ Сообщение отправлено в поддержку по обращению <b>#{ticket['id']}</b>.\n\n"
+        "Ответ придет сюда.",
+        reply_markup=support_keyboard(ticket["id"], for_admin=False),
+        parse_mode="HTML",
+    )
+
+
 async def notify_admins(bot: Bot, text: str) -> None:
     for admin_id in ADMIN_TELEGRAM_IDS:
         try:
@@ -1340,6 +1632,21 @@ async def notify_admins(bot: Bot, text: str) -> None:
             logger.warning("Cannot notify admin %s: %s", admin_id, exc.message)
         except Exception:
             logger.exception("Cannot notify admin %s", admin_id)
+
+
+async def notify_ticket_admins(bot: Bot, ticket: Dict[str, Any], text: str) -> None:
+    for admin_id in ADMIN_TELEGRAM_IDS:
+        try:
+            await bot.send_message(
+                admin_id,
+                text,
+                reply_markup=support_keyboard(ticket["id"], for_admin=True),
+                parse_mode="HTML",
+            )
+        except TelegramBadRequest as exc:
+            logger.warning("Cannot notify admin %s about ticket %s: %s", admin_id, ticket["id"], exc.message)
+        except Exception:
+            logger.exception("Cannot notify admin %s about ticket %s", admin_id, ticket["id"])
 
 
 async def handle_happ_profile_request(request: web.Request) -> web.Response:
