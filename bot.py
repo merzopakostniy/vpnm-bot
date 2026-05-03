@@ -913,6 +913,12 @@ xui: Optional[XuiApi] = None
 async def start(message: types.Message) -> None:
     upsert_user(message.from_user)
     await track_event("start", message.from_user.id, **user_payload(message.from_user))
+    await track_event(
+        "command",
+        message.from_user.id,
+        data={"command": "start"},
+        **user_payload(message.from_user),
+    )
     await message.answer(
         start_text(),
         reply_markup=main_keyboard(message.from_user.id),
@@ -1138,6 +1144,18 @@ async def check_payment(callback: types.CallbackQuery) -> None:
         payment_id=order["payment_id"],
         tariff=order["tariff_key"],
         amount=order["amount_rub"],
+    )
+    await track_event(
+        "purchase",
+        callback.from_user.id,
+        amount=order["amount_rub"],
+        data={
+            "currency": "RUB",
+            "provider": "yookassa",
+            "payment_id": order["payment_id"],
+            "order_id": order_id,
+            "tariff": order["tariff_key"],
+        },
     )
     if not try_set_order_status(order_id, {"pending", *FAILED_STATUSES}, "issuing"):
         await callback.answer("Заказ уже обрабатывается. Проверьте «Мои ключи».", show_alert=True)
