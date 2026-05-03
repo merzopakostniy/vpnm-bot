@@ -399,6 +399,14 @@ def support_message_body(message: types.Message) -> str:
     return f"[{message.content_type}]"
 
 
+def ticket_admin_text(ticket: Dict[str, Any], message_text: str) -> str:
+    return (
+        f"💬 <b>Обращение #{ticket['id']}</b>\n"
+        f"{support_user_label(ticket)}\n\n"
+        f"{escape(message_text)}"
+    )
+
+
 def main_keyboard(user_id: Optional[int] = None) -> InlineKeyboardMarkup:
     rows = [
         [InlineKeyboardButton(text="🚀 Купить VPN-доступ", callback_data="buy")],
@@ -1146,8 +1154,7 @@ async def support_command(message: types.Message) -> None:
     active_ticket = get_open_support_ticket(message.from_user.id)
     await message.answer(
         "💬 <b>Поддержка</b>\n\n"
-        "Создайте обращение и напишите вопрос прямо сюда. Администратор ответит вам в этом чате.\n\n"
-        f"Ваш Telegram ID: <code>{message.from_user.id}</code>",
+        "Создайте обращение и напишите вопрос. Ответ придет сюда.",
         reply_markup=support_entry_keyboard(active_ticket["id"] if active_ticket else None),
         parse_mode="HTML",
     )
@@ -1423,8 +1430,7 @@ async def support(callback: types.CallbackQuery) -> None:
     active_ticket = get_open_support_ticket(callback.from_user.id)
     await callback.message.answer(
         "💬 <b>Поддержка</b>\n\n"
-        "Создайте обращение и напишите вопрос прямо сюда. Администратор ответит вам в этом чате.\n\n"
-        f"Ваш Telegram ID: <code>{callback.from_user.id}</code>",
+        "Создайте обращение и напишите вопрос. Ответ придет сюда.",
         reply_markup=support_entry_keyboard(active_ticket["id"] if active_ticket else None),
         parse_mode="HTML",
     )
@@ -1436,8 +1442,7 @@ async def ticket_new(callback: types.CallbackQuery) -> None:
     active_ticket = get_open_support_ticket(callback.from_user.id)
     if active_ticket:
         await callback.message.answer(
-            f"💬 У вас уже есть открытое обращение <b>#{active_ticket['id']}</b>.\n\n"
-            "Напишите сообщение сюда, и я передам его администратору.",
+            f"💬 Обращение <b>#{active_ticket['id']}</b> уже открыто. Напишите сообщение сюда.",
             reply_markup=support_keyboard(active_ticket["id"], for_admin=False),
             parse_mode="HTML",
         )
@@ -1449,18 +1454,10 @@ async def ticket_new(callback: types.CallbackQuery) -> None:
     await track_event("support_ticket_created", callback.from_user.id, ticket_id=ticket_id, **user_payload(callback.from_user))
     await callback.message.answer(
         f"💬 <b>Обращение #{ticket_id} создано</b>\n\n"
-        "Опишите проблему одним сообщением: что не работает, какой клиент используете и на каком устройстве.",
+        "Опишите проблему одним сообщением.",
         reply_markup=support_keyboard(ticket_id, for_admin=False),
         parse_mode="HTML",
     )
-    if ticket:
-        await notify_ticket_admins(
-            callback.bot,
-            ticket,
-            f"🆕 <b>Новое обращение #{ticket_id}</b>\n\n"
-            f"Пользователь: {support_user_label(ticket)}\n\n"
-            "Пока без сообщения. Ждем текст от пользователя.",
-        )
     await callback.answer("Обращение создано")
 
 
@@ -1473,7 +1470,7 @@ async def ticket_continue(callback: types.CallbackQuery) -> None:
         return
     await callback.message.answer(
         f"💬 <b>Обращение #{ticket_id}</b>\n\n"
-        "Напишите сообщение сюда, я передам его администратору.",
+        "Напишите сообщение сюда.",
         reply_markup=support_keyboard(ticket_id, for_admin=False),
         parse_mode="HTML",
     )
@@ -1492,8 +1489,9 @@ async def ticket_user_close(callback: types.CallbackQuery) -> None:
         await notify_ticket_admins(
             callback.bot,
             ticket,
-            f"✅ <b>Обращение #{ticket_id} закрыто пользователем</b>\n\n"
-            f"Пользователь: {support_user_label(ticket)}",
+            f"✅ <b>Обращение #{ticket_id} закрыто пользователем</b>\n"
+            f"{support_user_label(ticket)}",
+            skip_user_id=callback.from_user.id,
         )
     await track_event("support_ticket_closed_by_user", callback.from_user.id, ticket_id=ticket_id)
     await callback.message.answer(f"✅ Обращение <b>#{ticket_id}</b> закрыто.", parse_mode="HTML")
@@ -1514,8 +1512,7 @@ async def ticket_reply(callback: types.CallbackQuery) -> None:
 
     admin_reply_state[callback.from_user.id] = ticket_id
     await callback.message.answer(
-        f"✍️ Ответ на обращение <b>#{ticket_id}</b>\n\n"
-        "Напишите следующим сообщением текст ответа. Я отправлю его пользователю.",
+        f"✍️ Ответ на <b>#{ticket_id}</b>. Напишите следующим сообщением.",
         parse_mode="HTML",
     )
     await callback.answer()
@@ -1607,13 +1604,13 @@ async def support_message_router(message: types.Message) -> None:
         await track_event("support_admin_reply", message.from_user.id, ticket_id=ticket_id)
         await message.bot.send_message(
             ticket["user_id"],
-            f"💬 <b>Ответ поддержки по обращению #{ticket_id}</b>\n\n"
+            f"💬 <b>Ответ поддержки #{ticket_id}</b>\n\n"
             f"{escape(message.text)}",
             reply_markup=support_keyboard(ticket_id, for_admin=False),
             parse_mode="HTML",
         )
         await message.answer(
-            f"✅ Ответ отправлен пользователю по обращению <b>#{ticket_id}</b>.",
+            f"✅ Ответ отправлен по <b>#{ticket_id}</b>.",
             reply_markup=support_keyboard(ticket_id, for_admin=True),
             parse_mode="HTML",
         )
@@ -1629,13 +1626,11 @@ async def support_message_router(message: types.Message) -> None:
     await notify_ticket_admins(
         message.bot,
         full_ticket,
-        f"💬 <b>Сообщение по обращению #{ticket['id']}</b>\n\n"
-        f"Пользователь: {support_user_label(full_ticket)}\n\n"
-        f"{escape(message.text)}",
+        ticket_admin_text(full_ticket, message.text),
+        skip_user_id=message.from_user.id,
     )
     await message.answer(
-        f"✅ Сообщение отправлено в поддержку по обращению <b>#{ticket['id']}</b>.\n\n"
-        "Ответ придет сюда.",
+        f"✅ Отправлено в поддержку. Обращение <b>#{ticket['id']}</b>.",
         reply_markup=support_keyboard(ticket["id"], for_admin=False),
         parse_mode="HTML",
     )
@@ -1657,13 +1652,13 @@ async def support_media_router(message: types.Message) -> None:
         await track_event("support_admin_reply_media", message.from_user.id, ticket_id=ticket_id, media_type=message.content_type)
         await message.bot.send_message(
             ticket["user_id"],
-            f"💬 <b>Ответ поддержки по обращению #{ticket_id}</b>",
+            f"💬 <b>Ответ поддержки #{ticket_id}</b>",
             reply_markup=support_keyboard(ticket_id, for_admin=False),
             parse_mode="HTML",
         )
         await message.copy_to(ticket["user_id"])
         await message.answer(
-            f"✅ Медиа-ответ отправлен пользователю по обращению <b>#{ticket_id}</b>.",
+            f"✅ Вложение отправлено по <b>#{ticket_id}</b>.",
             reply_markup=support_keyboard(ticket_id, for_admin=True),
             parse_mode="HTML",
         )
@@ -1688,11 +1683,13 @@ async def support_media_router(message: types.Message) -> None:
     )
 
     for admin_id in SUPPORT_TELEGRAM_IDS:
+        if admin_id == message.from_user.id:
+            continue
         try:
             await message.bot.send_message(
                 admin_id,
-                f"📎 <b>Вложение по обращению #{ticket['id']}</b>\n\n"
-                f"Пользователь: {support_user_label(full_ticket)}",
+                f"📎 <b>Обращение #{ticket['id']}</b>\n"
+                f"{support_user_label(full_ticket)}",
                 reply_markup=support_keyboard(ticket["id"], for_admin=True),
                 parse_mode="HTML",
             )
@@ -1703,8 +1700,7 @@ async def support_media_router(message: types.Message) -> None:
             logger.exception("Cannot send ticket media to admin %s", admin_id)
 
     await message.answer(
-        f"✅ Вложение отправлено в поддержку по обращению <b>#{ticket['id']}</b>.\n\n"
-        "Ответ придет сюда.",
+        f"✅ Вложение отправлено. Обращение <b>#{ticket['id']}</b>.",
         reply_markup=support_keyboard(ticket["id"], for_admin=False),
         parse_mode="HTML",
     )
@@ -1720,8 +1716,15 @@ async def notify_admins(bot: Bot, text: str) -> None:
             logger.exception("Cannot notify admin %s", admin_id)
 
 
-async def notify_ticket_admins(bot: Bot, ticket: Dict[str, Any], text: str) -> None:
+async def notify_ticket_admins(
+    bot: Bot,
+    ticket: Dict[str, Any],
+    text: str,
+    skip_user_id: Optional[int] = None,
+) -> None:
     for admin_id in SUPPORT_TELEGRAM_IDS:
+        if skip_user_id and admin_id == skip_user_id:
+            continue
         try:
             await bot.send_message(
                 admin_id,
