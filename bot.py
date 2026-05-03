@@ -282,10 +282,23 @@ def format_date(value: str) -> str:
     return datetime.fromisoformat(value).strftime("%d.%m.%Y")
 
 
-def key_text(title: str, client: XuiClient) -> str:
+def order_tariff_title(row: Dict[str, Any]) -> str:
+    tariff = TARIFFS.get(row["tariff_key"])
+    if tariff:
+        return f"{tariff['title']} ({row['days']} дней)"
+    if row["tariff_key"] == "admin_test":
+        return f"Тестовый доступ ({row['days']} дней)"
+    return f"{row['days']} дней"
+
+
+def key_text(title: str, client: XuiClient, tariff: Optional[Dict[str, Any]] = None) -> str:
     expires_text = client.expires_at.strftime("%d.%m.%Y")
+    tariff_text = ""
+    if tariff:
+        tariff_text = f"Тариф: <b>{escape(tariff['title'])}</b> / <b>{tariff['days']} дней</b>\n"
     return (
         f"✅ <b>{escape(title)}</b>\n\n"
+        f"{tariff_text}"
         f"Доступ активен до <b>{expires_text}</b>\n"
         f"Можно использовать на <b>{DEVICE_LIMIT} устройствах</b>.\n\n"
         "Ниже я отправлю профиль для Happ. Его нужно открыть в приложении и нажать подключение.\n\n"
@@ -295,6 +308,7 @@ def key_text(title: str, client: XuiClient) -> str:
 
 def stored_key_text(row: Dict[str, Any]) -> str:
     return (
+        f"Тариф: <b>{escape(order_tariff_title(row))}</b>\n"
         f"До <b>{format_date(row['expires_at'])}</b>\n"
         f"Устройства: <b>{DEVICE_LIMIT}</b>\n"
         f"<code>{escape(row['vless_link'])}</code>"
@@ -1106,7 +1120,7 @@ async def check_payment(callback: types.CallbackQuery) -> None:
     if order["status"] in PAID_STATUSES:
         await callback.message.answer(
             "✅ Этот заказ уже оплачен.\n\n"
-            f"<code>{escape(order['vless_link'])}</code>",
+            f"{stored_key_text(order)}",
             parse_mode="HTML",
         )
         await send_happ_profile(
@@ -1143,6 +1157,8 @@ async def check_payment(callback: types.CallbackQuery) -> None:
         order_id=order_id,
         payment_id=order["payment_id"],
         tariff=order["tariff_key"],
+        tariff_title=tariff["title"],
+        days=tariff["days"],
         amount=order["amount_rub"],
     )
     await track_event(
@@ -1155,6 +1171,8 @@ async def check_payment(callback: types.CallbackQuery) -> None:
             "payment_id": order["payment_id"],
             "order_id": order_id,
             "tariff": order["tariff_key"],
+            "tariff_title": tariff["title"],
+            "days": tariff["days"],
         },
     )
     if not try_set_order_status(order_id, {"pending", *FAILED_STATUSES}, "issuing"):
@@ -1185,7 +1203,7 @@ async def check_payment(callback: types.CallbackQuery) -> None:
         expires_at=client.expires_at.isoformat(),
     )
     await callback.message.answer(
-        key_text("Оплата прошла, ключ готов", client),
+        key_text("Оплата прошла, ключ готов", client, tariff),
         reply_markup=issued_key_keyboard(order_id),
         parse_mode="HTML",
     )
